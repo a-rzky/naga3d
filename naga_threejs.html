@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kepala Naga 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d0f14; }
+  body { background: radial-gradient(ellipse at 50% 40%, #2a2f3a 0%, #12141a 60%, #08090c 100%); }
+  canvas { display: block; }
+  #ui { position: fixed; left: 16px; bottom: 16px; display: flex; gap: 10px; align-items: center;
+        font: 13px/1.4 system-ui, sans-serif; color: #c9ced8; }
+  #ui button { font: inherit; color: #e8ebf0; background: #23272f; border: 1px solid #3a404c;
+               border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  #ui button:hover { background: #2e333d; }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="ui">
+  <button id="spin">Putar otomatis: nyala</button>
+  <span>Seret untuk memutar · gulir untuk zoom</span>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// Sumbu: +Z = arah moncong (depan), +Y = atas, simetri pada X.
+const V3 = THREE.Vector3;
+const PI = Math.PI;
+const lerp = THREE.MathUtils.lerp;
+const smooth = THREE.MathUtils.smoothstep;
+
+// ------------------------------------------------------------ acak berbenih
+let seed = 7;
+const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+
+// ------------------------------------------------------------ tekstur sisik (Voronoi, tileable)
+function scaleTextures(size = 2048, cells = 40, big = 9) {
+  const mkPts = n => { const a = new Float32Array(n * n * 3); for (let i = 0; i < a.length; i++) a[i] = rnd(); return a; };
+  const P1 = mkPts(cells), P2 = mkPts(big), o = [0, 0, 0];
+  const vor = (pts, n, fx, fy) => {
+    const gx = Math.floor(fx), gy = Math.floor(fy);
+    let f1 = 9, f2 = 9, id = 0;
+    for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+      const cx = gx + ox, cy = gy + oy;
+      const k = (((cy % n) + n) % n * n + ((cx % n) + n) % n) * 3;
+      const dx = cx + pts[k] - fx, dy = cy + pts[k + 1] - fy, d = Math.sqrt(dx * dx + dy * dy);
+      if (d < f1) { f2 = f1; f1 = d; id = pts[k + 2]; } else if (d < f2) f2 = d;
+    }
+    o[0] = f1; o[1] = f2; o[2] = id;
+  };
+  const cv = () => { const c = document.createElement('canvas'); c.width = c.height = size; return c; };
+  const col = cv(), bmp = cv(), rgh = cv();
+  const ctx = [col, bmp, rgh].map(c => c.getContext('2d'));
+  const img = ctx.map(c => c.createImageData(size, size));
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    vor(P1, cells, x / size * cells, y / size * cells);
+    const f1 = o[0], e1 = o[1] - o[0], id = o[2];
+    vor(P2, big, x / size * big, y / size * big);
+    const e2 = o[1] - o[0], id2 = o[2];
+    const g = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453, grain = g - Math.floor(g);
+    const crack = smooth(e1, 0.0, 0.16), plate = smooth(e2, 0.0, 0.05);
+    const tone = (0.68 + 0.22 * id + 0.10 * id2) * (0.35 + 0.65 * crack) * (0.42 + 0.58 * plate) * (0.93 + 0.07 * grain);
+    const h = smooth(e1, 0.0, 0.35) * (0.55 + 0.45 * id) * (1 - 0.35 * f1) * (0.2 + 0.8 * smooth(e2, 0.0, 0.09)) + 0.04 * grain;
+    const rough = 0.96 - 0.40 * h;
+    const k = (y * size + x) * 4, vals = [tone, h, rough];
+    for (let t = 0; t < 3; t++) { const d = img[t].data, v = vals[t] * 255; d[k] = d[k + 1] = d[k + 2] = v; d[k + 3] = 255; }
+  }
+  ctx.forEach((c, i) => c.putImageData(img[i], 0, 0));
+  const mk = (c, srgb) => {
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 8;
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  return { map: mk(col, true), bump: mk(bmp, false), rough: mk(rgh, false) };
+}
+const TEX = scaleTextures();
+
+function skinMaterial(ru, rv) {
+  const map = TEX.map.clone(), bump = TEX.bump.clone(), rough = TEX.rough.clone();
+  for (const t of [map, bump, rough]) t.repeat.set(ru, rv);
+  return new THREE.MeshStandardMaterial({
+    map, bumpMap: bump, bumpScale: 3.0, roughnessMap: rough, roughness: 1.0, vertexColors: true, metalness: 0.0,
+  });
+}
+
+// derau nilai 3D (untuk belang warna kulit)
+function vnoise(x, y, z) {
+  const h = (i, j, k) => { const v = Math.sin(i * 127.1 + j * 311.7 + k * 74.7) * 43758.5453; return v - Math.floor(v); };
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const f = t => t * t * (3 - 2 * t), u = f(x - xi), v = f(y - yi), w = f(z - zi);
+  const L = (a, b, t) => a + (b - a) * t;
+  return L(L(L(h(xi, yi, zi), h(xi + 1, yi, zi), u), L(h(xi, yi + 1, zi), h(xi + 1, yi + 1, zi), u), v),
+           L(L(h(xi, yi, zi + 1), h(xi + 1, yi, zi + 1), u), L(h(xi, yi + 1, zi + 1), h(xi + 1, yi + 1, zi + 1), u), v), w);
+}
+
+// ------------------------------------------------------------ badan "loft" + pahatan gumpalan
+const spow = (v, e) => Math.sign(v) * Math.pow(Math.abs(v), 2 / e);
+const cr = (a, b, c, d, t) => 0.5 * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (-a + 3 * b - 3 * c + d) * t * t * t);
+
+function makeBody({ rings, blobs = [], e = 2.3, capFront = 0.4, capBack = 0.3 }) {
+  const zs = rings.map(r => r.z), z0 = zs[0], z1 = zs[zs.length - 1];
+  const allBlobs = [];
+  for (const b of blobs) {
+    allBlobs.push({ p: new V3(...b.p), r: b.r, s: b.s });
+    if (b.p[0] !== 0) allBlobs.push({ p: new V3(-b.p[0], b.p[1], b.p[2]), r: b.r, s: b.s });
+  }
+  const prof = z => {
+    let i = 0; while (i < rings.length - 2 && z > zs[i + 1]) i++;
+    const t = THREE.MathUtils.clamp((z - zs[i]) / (zs[i + 1] - zs[i]), 0, 1);
+    const a = rings[Math.max(i - 1, 0)], b = rings[i], c = rings[i + 1], d = rings[Math.min(i + 2, rings.length - 1)];
+    const o = {};
+    for (const k of ['cy', 'w', 'top', 'bot']) o[k] = cr(a[k], b[k], c[k], d[k], t);
+    let f = 1;
+    if (z > z1 - capFront) f = Math.sqrt(Math.max(1e-5, 1 - ((z - (z1 - capFront)) / capFront) ** 2));
+    if (z < z0 + capBack) f = Math.sqrt(Math.max(1e-5, 1 - (((z0 + capBack) - z) / capBack) ** 2));
+    o.w = Math.max(o.w, 0.01) * f; o.top = Math.max(o.top, 0.01) * f; o.bot = Math.max(o.bot, 0.01) * f;
+    return o;
+  };
+  const point = (z, a) => {
+    const r = prof(z), c = Math.cos(a), s = Math.sin(a);
+    const x = r.w * spow(c, e), y = (s >= 0 ? r.top : r.bot) * spow(s, e);
+    const len = Math.hypot(x, y) || 1;
+    const p = new V3(x, r.cy + y, z);
+    let d = 0;
+    for (const b of allBlobs) d += b.s * Math.exp(-p.distanceToSquared(b.p) / (b.r * b.r));
+    p.x += x / len * d; p.y += y / len * d;
+    return p;
+  };
+  const normal = (z, a) => {
+    const h = 0.004;
+    const zc = THREE.MathUtils.clamp(z, z0 + 0.02, z1 - 0.02);
+    const da = point(zc, a + h).sub(point(zc, a - h));
+    const dz = point(zc + h, a).sub(point(zc - h, a));
+    const n = da.cross(dz).normalize();
+    const p = point(zc, a), c = prof(zc).cy;
+    if (n.x * p.x + n.y * (p.y - c) < 0) n.negate();
+    return n;
+  };
+  const build = (material, colorFn, nU = 230, nV = 280) => {
+    const pos = [], nor = [], uv = [], colr = [], idx = [];
+    const col = new THREE.Color();
+    for (let j = 0; j <= nV; j++) {
+      const v = j / nV, z = z0 + (z1 - z0) * (1 - Math.cos(PI * v)) / 2;
+      for (let i = 0; i <= nU; i++) {
+        const a = i / nU * 2 * PI, p = point(z, a), n = normal(z, a);
+        pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); uv.push(i / nU, (z - z0) / (z1 - z0));
+        colorFn(p, col); colr.push(col.r, col.g, col.b);
+      }
+    }
+    for (let j = 0; j < nV; j++) for (let i = 0; i < nU; i++) {
+      const a = j * (nU + 1) + i, b = a + 1, c = a + nU + 1, d = c + 1;
+      idx.push(a, b, c, b, d, c);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(colr, 3));
+    g.setIndex(idx);
+    const m = new THREE.Mesh(g, material);
+    m.castShadow = m.receiveShadow = true;
+    return m;
+  };
+  const addBlob = (p, r, s) => {
+    allBlobs.push({ p: p.clone(), r, s });
+    if (Math.abs(p.x) > 1e-4) allBlobs.push({ p: new V3(-p.x, p.y, p.z), r, s });
+  };
+  return { point, normal, build, addBlob };
+}
+
+// ------------------------------------------------------------ bentuk kepala
+const EYE = new V3(0.70, 0.50, 0.58);
+const brow = [];
+for (let i = 0; i <= 6; i++) {
+  const t = i / 6;
+  brow.push({ p: [lerp(0.22, 1.12, t), lerp(0.50, 0.98, t), lerp(1.02, 0.15, t)], r: 0.21, s: 0.17 + 0.06 * Math.sin(t * PI) });
+}
+const head = makeBody({
+  rings: [
+    { z: -3.3, cy: -0.95, w: 0.85, top: 0.85, bot: 0.90 },
+    { z: -2.3, cy: -0.45, w: 0.98, top: 0.92, bot: 0.95 },
+    { z: -1.4, cy: 0.00, w: 1.16, top: 0.96, bot: 0.90 },
+    { z: -0.7, cy: 0.20, w: 1.30, top: 0.96, bot: 0.80 },
+    { z: 0.0, cy: 0.20, w: 1.20, top: 0.90, bot: 0.60 },
+    { z: 0.5, cy: 0.10, w: 0.96, top: 0.62, bot: 0.45 },
+    { z: 1.1, cy: 0.00, w: 0.78, top: 0.50, bot: 0.35 },
+    { z: 1.7, cy: -0.05, w: 0.72, top: 0.48, bot: 0.32 },
+    { z: 2.15, cy: -0.08, w: 0.72, top: 0.50, bot: 0.30 },
+    { z: 2.5, cy: -0.12, w: 0.62, top: 0.42, bot: 0.26 },
+    { z: 2.72, cy: -0.14, w: 0.52, top: 0.36, bot: 0.22 },
+  ],
+  blobs: [
+    ...brow,
+    { p: [EYE.x, EYE.y - 0.04, EYE.z + 0.05], r: 0.19, s: -0.12 },      // rongga mata
+    { p: [1.15, -0.10, -0.35], r: 0.50, s: 0.14 },                      // tulang pipi
+    { p: [0.85, -0.05, 0.70], r: 0.35, s: 0.07 },                       // pipi depan
+    { p: [0.33, 0.22, 2.40], r: 0.22, s: 0.10 },                        // cuping hidung
+    { p: [0.36, 0.20, 2.62], r: 0.075, s: -0.07 },                      // lubang hidung
+    { p: [0, 0.48, 1.5], r: 0.30, s: 0.06 },                            // batang hidung
+    { p: [0, 0.55, 0.9], r: 0.28, s: 0.06 },
+    { p: [0, 1.05, -0.2], r: 0.45, s: 0.08 },                           // dahi
+  ],
+});
+const jaw = makeBody({
+  rings: [
+    { z: -1.9, cy: -0.55, w: 0.85, top: 0.30, bot: 0.28 },
+    { z: -1.1, cy: -0.66, w: 1.08, top: 0.35, bot: 0.38 },
+    { z: -0.4, cy: -0.70, w: 1.16, top: 0.35, bot: 0.48 },
+    { z: 0.4, cy: -0.60, w: 0.97, top: 0.25, bot: 0.42 },
+    { z: 1.2, cy: -0.52, w: 0.76, top: 0.20, bot: 0.34 },
+    { z: 1.9, cy: -0.50, w: 0.68, top: 0.18, bot: 0.30 },
+    { z: 2.35, cy: -0.48, w: 0.58, top: 0.16, bot: 0.26 },
+    { z: 2.62, cy: -0.46, w: 0.46, top: 0.14, bot: 0.22 },
+  ],
+  blobs: [{ p: [0, -0.80, 2.3], r: 0.35, s: 0.08 }, { p: [1.05, -0.80, -0.55], r: 0.55, s: 0.13 }],
+  capFront: 0.35,
+});
+
+const RED = new THREE.Color(0.115, 0.017, 0.016), RED2 = new THREE.Color(0.15, 0.028, 0.023);
+const TAN = new THREE.Color(0.14, 0.10, 0.085), DARK = new THREE.Color(0.10, 0.03, 0.03);
+const eyeL = EYE.clone().setX(-EYE.x);
+function headColor(p, c) {
+  c.copy(RED).lerp(RED2, smooth(p.z, 0.8, 2.6) * 0.8);
+  c.lerp(TAN, smooth(-p.y, 0.05, 0.75) * (1 - smooth(p.z, 1.6, 2.5) * 0.6));
+  const d = Math.min(p.distanceTo(EYE), p.distanceTo(eyeL));
+  c.lerp(DARK, (1 - smooth(d, 0.12, 0.36)) * 0.8);
+  mottle(p, c);
+}
+const DUST = new THREE.Color(0.20, 0.135, 0.115);
+function mottle(p, c) {
+  c.multiplyScalar(0.70 + 0.55 * vnoise(p.x * 2.3, p.y * 2.3, p.z * 2.3));
+  c.lerp(DUST, 0.30 * smooth(vnoise(p.x * 6 + 9, p.y * 6, p.z * 6), 0.55, 0.9));
+}
+function jawColor(p, c) {
+  c.copy(TAN).lerp(RED2, smooth(p.z, 1.6, 2.6) * 0.45);
+  c.lerp(DARK, smooth(p.y, -0.55, -0.30) * 0.5);        // garis bibir lebih gelap
+  mottle(p, c);
+}
+
+// lipatan & kerutan: deretan gumpalan kecil di sepanjang jalur [z, sudut/PI] pada permukaan
+function ridge(body, path, r, s, step = 0.05) {
+  const pts = [];
+  for (let i = 0; i < path.length - 1; i++) {
+    const [z0, a0] = path[i], [z1, a1] = path[i + 1];
+    const n = Math.max(1, Math.ceil(body.point(z0, a0 * PI).distanceTo(body.point(z1, a1 * PI)) / step));
+    for (let k = 0; k < n; k++) pts.push(body.point(lerp(z0, z1, k / n), lerp(a0, a1, k / n) * PI));
+  }
+  pts.forEach(p => body.addBlob(p, r, s));
+}
+ridge(head, [[2.35, -0.02], [1.9, -0.06], [1.3, -0.08], [0.7, -0.04], [0.25, 0.03], [-0.15, 0.10]], 0.06, -0.022);  // lipatan pipi
+ridge(head, [[2.40, -0.10], [1.9, -0.14], [1.3, -0.16], [0.7, -0.13], [0.2, -0.07]], 0.08, 0.016);                // bibir atas menebal
+ridge(head, [[0.98, 0.21], [0.80, 0.145], [0.58, 0.115], [0.38, 0.135], [0.20, 0.18]], 0.07, 0.022);             // kantung mata
+ridge(head, [[0.35, 0.41], [-0.2, 0.39], [-0.9, 0.38]], 0.06, -0.016);                                            // kerut dahi
+ridge(head, [[0.1, 0.33], [-0.5, 0.32], [-1.1, 0.33]], 0.06, -0.014);
+ridge(head, [[-1.5, 0.05], [-1.6, 0.25], [-1.7, 0.45]], 0.09, 0.02);                                              // gelambir belakang tengkorak
+for (const z of [1.15, 1.45, 1.75, 2.05]) head.addBlob(head.point(z, PI / 2), 0.11, 0.045);                       // ruas batang hidung
+ridge(jaw, [[2.3, 0.05], [1.5, 0.03], [0.6, 0.02], [-0.3, 0.04]], 0.07, 0.018);                                   // bibir bawah
+
+const dragon = new THREE.Group();
+dragon.add(head.build(skinMaterial(3, 3), headColor));
+dragon.add(jaw.build(skinMaterial(3, 2), jawColor, 170, 170));
+
+// ------------------------------------------------------------ tanduk & duri
+function hornTexture() {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 1024;
+  const g = c.getContext('2d');
+  g.fillStyle = '#cdc4b6'; g.fillRect(0, 0, 512, 1024);
+  for (let i = 0; i < 520; i++) {                       // serat memanjang
+    let x = rnd() * 512; const y0 = rnd() * 1024, len = 80 + rnd() * 500;
+    g.strokeStyle = `rgba(${40 + rnd() * 40 | 0},${30 + rnd() * 25 | 0},${22 + rnd() * 20 | 0},${0.06 + rnd() * 0.22})`;
+    g.lineWidth = 0.6 + rnd() * 2.4; g.beginPath(); g.moveTo(x, y0);
+    for (let y = y0; y < y0 + len; y += 24) { x += (rnd() - 0.5) * 7; g.lineTo(x, y); }
+    g.stroke();
+  }
+  for (let i = 0; i < 60; i++) {                        // gelang pertumbuhan
+    const y = rnd() * 1024; g.strokeStyle = `rgba(35,25,20,${0.10 + rnd() * 0.25})`; g.lineWidth = 1 + rnd() * 4;
+    g.beginPath(); g.moveTo(0, y); for (let x = 0; x <= 512; x += 32) g.lineTo(x, y + (rnd() - 0.5) * 5); g.stroke();
+  }
+  for (let i = 0; i < 2500; i++) { g.fillStyle = `rgba(30,20,15,${rnd() * 0.25})`; g.fillRect(rnd() * 512, rnd() * 1024, 1 + rnd() * 2, 1 + rnd() * 3); }
+  const mk = srgb => { const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 8; if (srgb) t.colorSpace = THREE.SRGBColorSpace; return t; };
+  return { map: mk(true), bump: mk(false) };
+}
+const HTEX = hornTexture();
+const hornMat = new THREE.MeshStandardMaterial({
+  vertexColors: true, roughness: 0.82, map: HTEX.map, bumpMap: HTEX.bump, bumpScale: 1.6,
+});
+const BONE_A = new THREE.Color(0.085, 0.052, 0.045), BONE_B = new THREE.Color(0.32, 0.28, 0.235);
+const NUB_A = new THREE.Color(0.09, 0.013, 0.013), NUB_B = new THREE.Color(0.17, 0.09, 0.075);
+
+function horn(points, r0, rings = 26, { radFn = null, cA = BONE_A, cB = BONE_B, mat = hornMat } = {}) {
+  const curve = new THREE.CatmullRomCurve3(points.map(p => new V3(...p)));
+  const N = 170, R = 40, fr = curve.computeFrenetFrames(N, false);
+  const pos = [], nor = [], uv = [], colr = [], idx = [], c = new THREE.Color();
+  for (let i = 0; i <= N; i++) {
+    const t = i / N, p = curve.getPointAt(t);
+    const seg = 1 + 0.10 * Math.pow(Math.abs(Math.sin(t * rings * PI)), 0.5);
+    const r = radFn ? radFn(t) : r0 * Math.pow(1 - t, 0.62) * seg + 0.003;
+    c.copy(cA).lerp(cB, smooth(t, 0.0, 0.55));
+    for (let j = 0; j <= R; j++) {
+      const a = j / R * 2 * PI;
+      const n = fr.normals[i].clone().multiplyScalar(Math.cos(a)).addScaledVector(fr.binormals[i], Math.sin(a));
+      const rr = radFn ? r : r * (1 + 0.035 * Math.sin(a * 8 + t * 5) + 0.015 * Math.sin(a * 19 - t * 9));
+      pos.push(p.x + n.x * rr, p.y + n.y * rr, p.z + n.z * rr); nor.push(n.x, n.y, n.z);
+      uv.push(j / R, t); colr.push(c.r, c.g, c.b);
+    }
+  }
+  for (let i = 0; i < N; i++) for (let j = 0; j < R; j++) {
+    const a = i * (R + 1) + j, b = a + 1, d = a + R + 1, e = d + 1;
+    idx.push(a, b, d, b, e, d);       // sisi luar menghadap keluar (tanduk padat, tidak kopong)
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(colr, 3));
+  // tutup pangkal agar benar-benar tertutup rapat
+  const c0 = pos.length / 3, p0 = curve.getPointAt(0);
+  pos.push(p0.x, p0.y, p0.z); nor.push(0, -1, 0); uv.push(0.5, 0); colr.push(cA.r, cA.g, cA.b);
+  for (let j = 0; j < R; j++) idx.push(c0, j + 1, j);
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(colr, 3));
+  g.setIndex(idx); g.deleteAttribute('normal'); g.computeVertexNormals();
+  const na = g.attributes.normal, t1 = new V3(), t2 = new V3();     // rapikan sambungan normal
+  for (let i = 0; i <= N; i++) {
+    const a = i * (R + 1), b = a + R;
+    t1.fromBufferAttribute(na, a); t2.fromBufferAttribute(na, b); t1.add(t2).normalize();
+    na.setXYZ(a, t1.x, t1.y, t1.z); na.setXYZ(b, t1.x, t1.y, t1.z);
+  }
+  const m = new THREE.Mesh(g, mat); m.castShadow = m.receiveShadow = true;
+  return m;
+}
+function hornPair(points, r0, rings, opts) {
+  dragon.add(horn(points, r0, rings, opts));
+  dragon.add(horn(points.map(([x, y, z]) => [-x, y, z]), r0, rings, opts));
+}
+// tonjolan alis tebal yang menaungi mata (tatapan marah), menempel di permukaan kepala
+const browMat = skinMaterial(1, 3);
+for (const sx of [1, -1]) {
+  const pts = [[1.10, 0.43], [0.88, 0.37], [0.68, 0.30], [0.40, 0.265], [0.05, 0.24], [-0.30, 0.225]].map(([z, a]) => {
+    const aa = sx > 0 ? a * PI : PI - a * PI;
+    return head.point(z, aa).addScaledVector(head.normal(z, aa), 0.02).toArray();
+  });
+  dragon.add(horn(pts, 0, 0, { radFn: t => 0.015 + 0.125 * Math.pow(Math.sin(PI * t), 0.55), cA: RED, cB: RED, mat: browMat }));
+}
+// tanduk rebah ke belakang mengikuti garis kepala. besar: di depan, merentang ke luar. pendek: lebih ke belakang, ujung menekuk ke dalam
+hornPair([[0.86, 0.58, -0.80], [1.30, 1.02, -1.45], [1.72, 1.40, -2.35], [1.98, 1.72, -3.35], [2.00, 2.08, -4.30]], 0.42, 22);
+hornPair([[0.40, 0.48, -1.85], [0.46, 0.69, -2.175], [0.51, 0.84, -2.575], [0.50, 0.98, -3.00], [0.44, 1.15, -3.375]], 0.23, 10);   // setengah panjang semula
+
+const UP = new V3(0, 1, 0);
+const Zax = new V3(0, 0, 1);
+function spike(p, dir, len, rad, flat = 1, cA = BONE_A, cB = BONE_B) {
+  const g = new THREE.ConeGeometry(rad, len, 10, 1);
+  g.translate(0, len / 2, 0);
+  const col = [], c = new THREE.Color(), pa = g.attributes.position;
+  for (let i = 0; i < pa.count; i++) { c.copy(cA).lerp(cB, smooth(pa.getY(i) / len, 0, 0.7)); col.push(c.r, c.g, c.b); }
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  const m = new THREE.Mesh(g, hornMat);
+  dir = dir.clone().normalize();
+  m.quaternion.setFromUnitVectors(UP, dir);
+  m.scale.set(flat, 1, 1);
+  m.position.copy(p).addScaledVector(dir, -len * 0.15);
+  m.castShadow = true;
+  dragon.add(m);
+}
+// duri simetris pada sebuah badan: sudut a (sisi kanan) dicerminkan ke kiri
+function spikeBoth(body, z, a, len, rad, bias = new V3(), flat = 1, cA, cB) {
+  for (const aa of (Math.abs(Math.cos(a)) < 1e-3 ? [a] : [a, PI - a])) {
+    const n = body.normal(z, aa), b = bias.clone(); if (aa !== a) b.x = -b.x;
+    spike(body.point(z, aa), n.add(b), len, rad, flat, cA, cB);
+  }
+}
+
+// mahkota duri di sekeliling pangkal tanduk
+for (const [zc, ac, rz, ra, big] of [[-0.85, 0.285, 0.50, 0.135, 1], [-1.85, 0.41, 0.34, 0.085, 0.75]]) {
+  for (let k = 0; k < 11; k++) {
+    const f = k / 11 * 2 * PI;
+    if (Math.cos(f) < -0.75) continue;                 // sisi belakang tertutup tanduk
+    spikeBoth(head, zc + Math.cos(f) * rz, (ac + Math.sin(f) * ra) * PI,
+      (0.16 + 0.12 * rnd()) * big, 0.05 * big, new V3(0.15 * Math.sin(f), 0.5, -0.5 + 0.4 * Math.cos(f)));
+  }
+}
+// sisik bibir (labial) di tepi rahang atas
+const lipMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(0.10, 0.02, 0.018), roughness: 0.6, bumpMap: TEX.bump, bumpScale: 1.5 });
+for (let z = 0.05; z < 2.5; z += 0.15) {
+  for (const a of [-0.17 * PI, PI + 0.17 * PI]) {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(1, 14, 10), lipMat);
+    m.scale.set(0.06, 0.03, 0.082); m.position.copy(head.point(z, a));
+    m.quaternion.setFromUnitVectors(UP, head.normal(z, a)); m.castShadow = m.receiveShadow = true;
+    dragon.add(m);
+  }
+}
+// jambul tengah: dari batang hidung ke puncak dahi
+for (let z = 1.45, i = 0; z > -2.6; i++) {
+  const k = smooth(z, 1.5, -0.55) * (1 - 0.55 * smooth(-z, 0.7, 2.6));
+  const len = 0.16 + 0.85 * k;
+  spikeBoth(head, z, PI / 2, len, 0.075 + 0.13 * k, new V3(0, 0, -0.35 - 0.5 * k), 0.8);
+  z -= 0.19 + 0.24 * k;
+}
+// duri pipi besar di sisi kepala
+for (let z = 0.15, i = 0; z > -1.9; z -= 0.24, i++) {
+  const a = (i % 2 ? 0.10 : -0.06) * PI;
+  spikeBoth(head, z, a, 0.30 + 0.30 * smooth(-z, -0.2, 1.2) + 0.08 * rnd(), 0.085, new V3(0.2, 0.05, -0.75));
+  spikeBoth(head, z - 0.1, -0.20 * PI, 0.22 + 0.1 * rnd(), 0.06, new V3(0.1, -0.2, -0.6));
+}
+// duri kecil di sepanjang alis dan pangkal tanduk
+for (let i = 0; i <= 7; i++) {
+  const t = i / 7;
+  spikeBoth(head, lerp(0.55, -0.55, t), lerp(0.20, 0.30, t) * PI, 0.12 + 0.12 * t, 0.04, new V3(0.3, 0.3, -0.4));
+}
+for (let i = 0; i < 8; i++) {
+  const a = (0.22 + 0.05 * rnd()) * PI, z = -0.5 - i * 0.16;
+  spikeBoth(head, z, a, 0.14 + 0.1 * rnd(), 0.04, new V3(0.3, 0.2, -0.5));
+}
+// bintil-bintil kecil di dahi dan moncong
+for (let i = 0; i < 45; i++) {
+  const z = lerp(-2.0, 1.9, rnd()), a = lerp(0.14, 0.46, rnd()) * PI;
+  if (head.point(z, a).distanceTo(EYE) < 0.34) continue;
+  spikeBoth(head, z, a, 0.05 + 0.06 * rnd(), 0.035, new V3(0, 0, -0.3), 1, NUB_A, NUB_B);
+}
+// duri sepanjang garis rahang sampai dagu
+for (let z = -1.15, i = 0; z < 2.3; z += 0.19, i++) {
+  const len = 0.20 + 0.14 * (i % 2) + 0.06 * rnd();
+  spikeBoth(jaw, z, -0.10 * PI, len, 0.06, new V3(0.35, -0.55, -0.2));
+  spikeBoth(jaw, z + 0.09, -0.30 * PI, len * 0.8, 0.05, new V3(0.1, -0.6, -0.2));
+}
+for (let i = 0; i <= 8; i++) {
+  const a = lerp(-0.12, -0.88, i / 8) * PI;
+  spike(jaw.point(2.50, a), jaw.normal(2.50, a).add(new V3(0, -0.5, 0.25)), 0.17 + 0.10 * (i % 2), 0.045);
+}
+
+// ------------------------------------------------------------ mata
+function eyeTexture() {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 256;
+  const g = c.getContext('2d');
+  g.fillStyle = '#1a0805'; g.fillRect(0, 0, 512, 256);
+  const gr = g.createRadialGradient(256, 128, 4, 256, 128, 74);
+  gr.addColorStop(0, '#fff06a'); gr.addColorStop(0.45, '#f2c71a'); gr.addColorStop(0.85, '#b56a08'); gr.addColorStop(1, '#2a0d04');
+  g.fillStyle = gr; g.beginPath(); g.arc(256, 128, 74, 0, 2 * PI); g.fill();
+  g.strokeStyle = 'rgba(120,60,0,0.5)'; g.lineWidth = 1.5;
+  for (let i = 0; i < 48; i++) { const a = i / 48 * 2 * PI; g.beginPath(); g.moveTo(256 + 16 * Math.cos(a), 128 + 16 * Math.sin(a)); g.lineTo(256 + 70 * Math.cos(a), 128 + 70 * Math.sin(a)); g.stroke(); }
+  g.fillStyle = '#000'; g.beginPath(); g.ellipse(256, 128, 9, 56, 0, 0, 2 * PI); g.fill();
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const eyeTex = eyeTexture();
+const eyeMat = new THREE.MeshStandardMaterial({ map: eyeTex, emissiveMap: eyeTex, emissive: 0xffffff, emissiveIntensity: 0.55, roughness: 0.08 });
+const lidMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(0.065, 0.012, 0.011), roughness: 0.7, bumpMap: TEX.bump, bumpScale: 1.5 });
+for (const sx of [1, -1]) {
+  const e = new THREE.Mesh(new THREE.SphereGeometry(0.15, 40, 24), eyeMat);
+  e.position.set(sx * (EYE.x - 0.02), EYE.y - 0.02, EYE.z - 0.07);
+  const dir = new V3(sx * 0.42, 0.22, 0.88).normalize();
+  e.quaternion.setFromUnitVectors(new V3(1, 0, 0), dir);
+  dragon.add(e);
+  const lid = new THREE.Mesh(new THREE.TorusGeometry(0.135, 0.042, 12, 32), lidMat);   // kelopak mata
+  lid.position.copy(e.position).addScaledVector(dir, 0.075);
+  lid.quaternion.setFromUnitVectors(Zax, dir); lid.scale.set(1.12, 0.80, 1);
+  lid.castShadow = lid.receiveShadow = true; dragon.add(lid);
+}
+// lubang hidung
+const darkMat = new THREE.MeshStandardMaterial({ color: 0x050202, roughness: 0.9 });
+for (const sx of [1, -1]) {
+  const n = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), darkMat);
+  n.scale.set(0.07, 0.05, 0.03); n.position.set(sx * 0.37, 0.19, 2.555); n.rotation.z = sx * 0.5;
+  dragon.add(n);
+}
+
+// pelat ujung moncong & dagu (menutup kutub tekstur)
+const plateMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(0.045, 0.012, 0.011), roughness: 0.75, bumpMap: TEX.bump, bumpScale: 2 });
+for (const [y, z, sxz] of [[-0.13, 2.68, [0.13, 0.10, 0.04]], [-0.95, -3.20, [0.66, 0.68, 0.13]]]) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), plateMat);
+  m.scale.set(...sxz); m.position.set(0, y, z); m.castShadow = m.receiveShadow = true; dragon.add(m);
+}
+
+// ------------------------------------------------------------ adegan
+const scene = new THREE.Scene();
+dragon.rotation.x = 0.30;                 // kepala sedikit menunduk, seperti referensi
+dragon.position.y = -0.55;
+scene.add(dragon);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const pm = new THREE.PMREMGenerator(renderer);
+scene.environment = pm.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.4;
+
+const key = new THREE.DirectionalLight(0xfff1e0, 2.8);
+key.position.set(3.5, 7, 7); key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, { left: -5, right: 5, top: 6, bottom: -5, near: 1, far: 25 });
+key.shadow.bias = -0.0004; key.shadow.normalBias = 0.03;
+scene.add(key);
+const fill = new THREE.DirectionalLight(0x8fb0ff, 0.9); fill.position.set(-6, 1, 5); scene.add(fill);
+const rim = new THREE.DirectionalLight(0xff8a50, 2.2); rim.position.set(-3, 4, -7); scene.add(rim);
+
+const camera = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.1, 100);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.55, 0);
+controls.enableDamping = true; controls.minDistance = 4; controls.maxDistance = 30;
+controls.autoRotate = true; controls.autoRotateSpeed = 1.2;
+
+// ?az=30&el=10 -> sudut kamera tetap (untuk tangkapan layar)
+const q = new URLSearchParams(location.search);
+const az = THREE.MathUtils.degToRad(+(q.get('az') ?? 0)), el = THREE.MathUtils.degToRad(+(q.get('el') ?? 4));
+const dist = +(q.get('d') ?? 11.5);
+camera.position.set(Math.sin(az) * Math.cos(el) * dist, 0.55 + Math.sin(el) * dist, Math.cos(az) * Math.cos(el) * dist);
+if (q.has('az')) controls.autoRotate = false;
+
+const btn = document.getElementById('spin');
+const label = () => btn.textContent = 'Putar otomatis: ' + (controls.autoRotate ? 'nyala' : 'mati');
+btn.onclick = () => { controls.autoRotate = !controls.autoRotate; label(); };
+label();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+</script>
+</body>
+</html>
